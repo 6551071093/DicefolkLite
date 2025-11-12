@@ -1,0 +1,26 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run DicefolkLite (SFML)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/DicefolkLite.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build",
+            "environment": [],
+            "externalConsole": true,
+            "MIMode": "gdb",
+            "miDebuggerPath": "E:/vscode/mingw64/bin/gdb.exe",
+            "preLaunchTask": "Build and Run DicefolkLite (SFML)", 
+            "setupCommands": [
+                {
+                    "description": "Enable pretty printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        }
+    ]
+}

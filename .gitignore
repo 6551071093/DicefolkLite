@@ -1,0 +1,41 @@
+# ============================================
+# Dicefolk Lite - .gitignore (C++ + SFML + VSCode)
+# ============================================
+
+# Build output
+/build/
+bin/
+obj/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Log và file tạm
+*.log
+*.tmp
+
+# SFML or static libraries
+lib/
+*.a
+*.lib
+
+# VSCode cache
+.vscode/ipch/
+.vscode/.browse.VC.db*
+.vscode/*.db
+
+# VSCode settings (giữ lại config quan trọng)
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/c_cpp_properties.json
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*~
+*.bak

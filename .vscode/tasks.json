@@ -1,0 +1,30 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build and Run DicefolkLite (SFML)",
+            "type": "shell",
+            "command": "g++",
+            "args": [
+                "${workspaceFolder}/source/*.cpp",
+                "-I", "E:/vscode/SFML-2.6.1/include",
+                "-L", "E:/vscode/SFML-2.6.1/lib",
+                "-lsfml-graphics",
+                "-lsfml-window",
+                "-lsfml-system",
+                "-lsfml-audio",
+                "-o", "${workspaceFolder}/build/DicefolkLite.exe",
+                "&&",
+                "cd", "${workspaceFolder}\\build",
+                "&&",
+                "DicefolkLite.exe"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"],
+            "detail": "Build and run DicefolkLite with SFML (Windows)"
+        }
+    ]
+}
