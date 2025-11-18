@@ -1,0 +1,427 @@
+#define _USE_MATH_DEFINES
+#include "Battle.h"
+#include "BattleConfig.h" 
+#include "Utils.h"
+#include <iostream>
+#include <algorithm>
+#include <map>
+#include <cmath> 
+
+using namespace std;
+
+static int findFirstAlive(const vector<Monster>& team) {
+    for (int i = 0; i < (int)team.size(); ++i) if (team[i].isAlive()) return i;
+    return -1;
+}
+
+static std::map<string, sf::Texture> textureCache;
+
+// Helper Random
+DiceInfo generateRandomdice() {
+    DiceInfo dice;
+    dice.isUsed = false;
+    int typeRoll = Utils::randomInt(0, 100);
+    
+    if (typeRoll < 40) { 
+        dice.type = DiceFace::Attack; dice.value = Utils::randomInt(3, 8); dice.description = "ATK"; 
+    } else if (typeRoll < 70) { 
+        dice.type = DiceFace::Shield; dice.value = Utils::randomInt(2, 6); dice.description = "DEF"; 
+    } else if (typeRoll < 85) { 
+        dice.type = DiceFace::BuffATK; dice.value = 2; dice.description = "BUFF"; // Buff cố định 2
+    } else { 
+        dice.type = DiceFace::RotateLeft; dice.value = 0; dice.description = "ROT"; 
+    }
+    return dice;
+}
+
+// === SỬA LỖI -Wreorder: Sắp xếp lại thứ tự khớp với Battle.h ===
+// (Thứ tự đúng: state, actionTimer, winFlag, isAllyTurn)
+Battle::Battle()
+    : state(BattleState::START_ROUND),
+      actionTimer(0.f), 
+      winFlag(false), 
+      isAllyTurn(true)
+{
+    // === SỬA LỖI PATH: Thêm ../ ===
+    if (!font.loadFromFile("../assets/fonts/arial.ttf")) cerr << "Error font\n";
+    // === SỬA LỖI PATH: Thêm ../ ===
+    if (backgroundTex.loadFromFile("../assets/sprites/Background_Battle.png")) backgroundSprite.setTexture(backgroundTex);
+
+    infoText.setFont(font);
+    infoText.setCharacterSize(24);
+    infoText.setFillColor(sf::Color::White);
+    infoText.setOutlineColor(sf::Color::Black);
+    infoText.setOutlineThickness(2.f);
+    infoText.setPosition(350.f, 30.f);
+}
+
+void Battle::loadStage(int idx) {
+    if (idx >= 0 && idx < (int)BattleConfig::stages.size()) enemies = BattleConfig::stages[idx].enemies;
+    else enemies.clear();
+}
+void Battle::loadBoss() { enemies = BattleConfig::boss.enemies; }
+
+void Battle::setAllies(const vector<Monster>& a) { 
+    allies = a; 
+    animatedAllies.clear();
+    for(const auto& m : allies) animatedAllies.push_back({m, {0,0}, {0,0}, 0.f, 0.f, false, 0.f}); 
+    calculateFormationPositions(true);
+}
+
+void Battle::calculateFormationPositions(bool isPlayerTeam) {
+    vector<AnimatedMonster>& team = isPlayerTeam ? animatedAllies : animatedEnemies;
+    const sf::Vector2f baseCenter = isPlayerTeam ? sf::Vector2f(320, 350) : sf::Vector2f(960, 350);
+    const float baseRadius = 120.f;
+    const float angularSpread = M_PI * 0.8f;
+    
+    vector<AnimatedMonster*> aliveMonsters;
+    for(auto& am : team) if (am.monster.isAlive()) aliveMonsters.push_back(&am);
+
+    if (aliveMonsters.empty()) return;
+
+    float angleStep = (aliveMonsters.size() > 1) ? angularSpread / (aliveMonsters.size() - 1) : 0;
+
+    for (size_t i = 0; i < aliveMonsters.size(); ++i) {
+        // am LÀ MỘT CON TRỎ (AnimatedMonster*)
+        AnimatedMonster* am = aliveMonsters[i];
+        float angle = -angularSpread / 2.f + i * angleStep; 
+        sf::Vector2f targetPos = { baseCenter.x + baseRadius * cos(angle), baseCenter.y + baseRadius * sin(angle) * 0.8f };
+        
+        // Vì am là con trỏ, chúng ta dùng '->' 
+        if (am->currentPos.x == 0 && am->currentPos.y == 0) am->currentPos = targetPos;
+        am->targetPos = targetPos;
+        am->moveTime = 0.f; am->moveDuration = 0.f;
+    }
+    
+    // am Ở ĐÂY LÀ MỘT THAM CHIẾU (AnimatedMonster&)
+    for(auto& am : team) {
+        // Vì am là tham chiếu, chúng ta dùng '.' 
+        if (!am.monster.isAlive()) { 
+            am.targetPos = {-1000.f, -1000.f}; 
+            am.currentPos = {-1000.f, -1000.f}; 
+        }
+    }
+}
+
+void Battle::startRound() {
+    state = BattleState::WAIT_INPUT;
+    playerDice.clear();
+    enemyDice.clear();
+    isAllyTurn = true; 
+
+    // 1. Reset Giáp và Check Buff
+    for(auto& m : allies) m.resetRoundStats();
+    for(auto& m : enemies) m.resetRoundStats();
+    
+    // 2. Re-init AnimatedEnemies
+    animatedEnemies.clear();
+    for(const auto& m : enemies) animatedEnemies.push_back({m, {0,0}, {0,0}, 0.f, 0.f, false, 0.f});
+
+    // 3. Sync AnimatedAllies
+    for(size_t i=0; i<allies.size(); ++i) if(i < animatedAllies.size()) animatedAllies[i].monster = allies[i];
+
+    // 4. Random Dice
+    for (int i = 0; i < 2; ++i) playerDice.push_back(generateRandomdice());
+    for (int i = 0; i < 2; ++i) enemyDice.push_back(generateRandomdice());
+
+    calculateFormationPositions(true);
+    calculateFormationPositions(false);
+    
+    infoText.setString("LEFT TURN: Use [1] or [2]");
+}
+
+void Battle::playerSelectdice(int index) {
+    if (state != BattleState::WAIT_INPUT) return;
+
+    if (isAllyTurn) {
+        if (index == 2 || index == 3) return; 
+        if (index < 0 || index >= (int)playerDice.size()) return;
+        if (playerDice[index].isUsed) return;
+        executediceEffect(playerDice[index], true);
+        playerDice[index].isUsed = true;
+        isAllyTurn = false; 
+        infoText.setString("RIGHT TURN: Use [3] or [4]");
+    } else {
+        if (index == 0 || index == 1) return;
+        int realIndex = index - 2; 
+        if (realIndex < 0 || realIndex >= (int)enemyDice.size()) return;
+        if (enemyDice[realIndex].isUsed) return;
+        executediceEffect(enemyDice[realIndex], false);
+        enemyDice[realIndex].isUsed = true;
+        isAllyTurn = true; 
+        infoText.setString("LEFT TURN: Use [1] or [2]");
+    }
+    state = BattleState::EXECUTING;
+    actionTimer = 1.0f;
+}
+
+void Battle::executediceEffect(DiceInfo& dice, bool isPlayerAction) {
+    vector<Monster>* pActorTeam = isPlayerAction ? &allies : &enemies;
+    vector<Monster>* pTargetTeam = isPlayerAction ? &enemies : &allies;
+    vector<AnimatedMonster>* pAnimActor = isPlayerAction ? &animatedAllies : &animatedEnemies;
+    vector<AnimatedMonster>* pAnimTarget = isPlayerAction ? &animatedEnemies : &animatedAllies;
+
+    vector<Monster>& actorTeam = *pActorTeam;
+    vector<Monster>& targetTeam = *pTargetTeam;
+    vector<AnimatedMonster>& animActor = *pAnimActor;
+    vector<AnimatedMonster>& animTarget = *pAnimTarget;
+
+    int actorIdx = findFirstAlive(actorTeam);
+    if (actorIdx == -1) return; 
+
+    string actorName = animActor[actorIdx].monster.getName();
+    int targetIdx = findFirstAlive(targetTeam);
+
+    string actionDesc = "";
+    if (dice.type == DiceFace::Attack) actionDesc = "Attack " + Utils::toString(dice.value);
+    else if (dice.type == DiceFace::Shield) actionDesc = "Shield " + Utils::toString(dice.value);
+    else if (dice.type == DiceFace::BuffATK) actionDesc = "Buff ATK";
+    else actionDesc = "Rotate";
+
+    infoText.setString((isPlayerAction ? "[LEFT] " : "[RIGHT] ") + actorName + " uses " + actionDesc);
+
+    switch (dice.type) {
+        case DiceFace::Attack:
+            if (targetIdx != -1) {
+                // [FIX DAME]: Tổng Dame = Xúc xắc + (Công Gốc + Buff)
+                int monsterAtk = actorTeam[actorIdx].getATK(); 
+                int totalDmg = dice.value + monsterAtk; 
+                
+                targetTeam[targetIdx].takeDamage(totalDmg);
+                animTarget[targetIdx].monster = targetTeam[targetIdx]; 
+
+                if (animTarget[targetIdx].monster.isAlive()) {
+                    animTarget[targetIdx].isHit = true;
+                    animTarget[targetIdx].hitTimer = 0.4f; 
+                }
+            }
+            break;
+        case DiceFace::Shield:
+            actorTeam[actorIdx].addShield(dice.value);
+            animActor[actorIdx].monster = actorTeam[actorIdx]; 
+            break;
+        case DiceFace::BuffATK:
+            actorTeam[actorIdx].buffAttack(dice.value);
+            animActor[actorIdx].monster = actorTeam[actorIdx];
+            break;
+        case DiceFace::RotateLeft:
+            rotateTeam(isPlayerAction, true);
+            break;
+        default: break;
+    }
+}
+
+void Battle::update(float dt) {
+    auto updateAnimAndHit = [&](vector<AnimatedMonster>& list) {
+        for (auto& am : list) {
+            if (am.moveTime > 0) {
+                float t = 1.f - (am.moveTime / am.moveDuration);
+                am.currentPos.x = am.currentPos.x * (1.f - t) + am.targetPos.x * t;
+                am.currentPos.y = am.currentPos.y * (1.f - t) + am.targetPos.y * t;
+                am.moveTime -= dt;
+                if (am.moveTime <= 0) am.currentPos = am.targetPos;
+            } else am.currentPos = am.targetPos;
+
+            if (am.isHit) {
+                am.hitTimer -= dt;
+                if (am.hitTimer <= 0) am.isHit = false;
+            }
+        }
+    };
+    updateAnimAndHit(animatedAllies);
+    updateAnimAndHit(animatedEnemies);
+
+    if (state == BattleState::EXECUTING) {
+        if (actionTimer > 0) { actionTimer -= dt; return; }
+        state = BattleState::CHECK_END;
+    }
+    else if (state == BattleState::CHECK_END) {
+        for(size_t i=0; i<allies.size() && i<animatedAllies.size(); ++i) animatedAllies[i].monster = allies[i];
+        for(size_t i=0; i<enemies.size() && i<animatedEnemies.size(); ++i) animatedEnemies[i].monster = enemies[i];
+        calculateFormationPositions(true);
+        calculateFormationPositions(false);
+
+        int aAlive = 0; for(auto& m : allies) if(m.isAlive()) aAlive++;
+        int eAlive = 0; for(auto& m : enemies) if(m.isAlive()) eAlive++;
+
+        if (aAlive == 0) { winFlag = false; state = BattleState::FINISHED; }
+        else if (eAlive == 0) { winFlag = true; state = BattleState::FINISHED; }
+        else {
+            bool leftHasDice = false; for(auto& d : playerDice) if(!d.isUsed) leftHasDice = true;
+            bool rightHasDice = false; for(auto& d : enemyDice) if(!d.isUsed) rightHasDice = true;
+
+            if (!leftHasDice && !rightHasDice) {
+                for(auto& m : allies) m.endTurn();
+                for(auto& m : enemies) m.endTurn();
+                startRound();
+            } else {
+                state = BattleState::WAIT_INPUT;
+            }
+        }
+    }
+}
+
+void Battle::renderDiceGroups(sf::RenderWindow& win) {
+    float gap = 120.f;
+    float yPos = 600.f; 
+
+    // Lấy chỉ số Công để hiển thị lên nút
+    int playerBonusAtk = 0;
+    int enemyBonusAtk = 0;
+    int pIdx = findFirstAlive(allies);
+    if (pIdx != -1) playerBonusAtk = allies[pIdx].getATK(); // getATK() đã bao gồm Buff
+    int eIdx = findFirstAlive(enemies);
+    if (eIdx != -1) enemyBonusAtk = enemies[eIdx].getATK();
+
+    auto drawdice = [&](float x, float y, DiceInfo& dice, sf::Color outlineCol, string keyHint, int bonusAtk) {
+        sf::RectangleShape box(sf::Vector2f(100.f, 100.f));
+        box.setPosition(x, y);
+        box.setOutlineThickness(3.f);
+        box.setOutlineColor(outlineCol);
+
+        if (dice.isUsed) box.setFillColor(sf::Color(50, 50, 50, 200));
+        else {
+            switch(dice.type) {
+                case DiceFace::Attack: box.setFillColor(sf::Color(220, 60, 60)); break; 
+                case DiceFace::Shield: box.setFillColor(sf::Color(60, 100, 220)); break; 
+                case DiceFace::BuffATK: box.setFillColor(sf::Color(220, 220, 60)); break; 
+                default: box.setFillColor(sf::Color::White); break;
+            }
+        }
+        win.draw(box);
+
+        string mainText = "", subText = "";
+        if (dice.type == DiceFace::RotateLeft) { mainText = "ROT"; subText = "Move"; } 
+        else {
+            int displayVal = dice.value;
+            // Nếu là Attack thì cộng thêm chỉ số Công của quái vào để người chơi thấy dame thực
+            if (dice.type == DiceFace::Attack) displayVal += bonusAtk;
+
+            mainText = Utils::toString(displayVal); 
+            if (dice.type == DiceFace::Attack) subText = "DMG";
+            else if (dice.type == DiceFace::Shield) subText = "DEF";
+            else if (dice.type == DiceFace::BuffATK) subText = "BUFF";
+        }
+
+        sf::Text tVal(mainText, font, 36);
+        tVal.setStyle(sf::Text::Bold);
+        tVal.setFillColor(dice.isUsed ? sf::Color(150, 150, 150) : sf::Color::Black);
+        sf::FloatRect b = tVal.getLocalBounds();
+        tVal.setOrigin(b.left + b.width/2.0f, b.top + b.height/2.0f);
+        tVal.setPosition(x + 50.f, y + 40.f);
+        win.draw(tVal);
+
+        sf::Text tSub(subText, font, 16);
+        tSub.setFillColor(dice.isUsed ? sf::Color(150, 150, 150) : sf::Color(20, 20, 20));
+        sf::FloatRect b2 = tSub.getLocalBounds();
+        tSub.setOrigin(b2.left + b2.width/2.0f, b2.top + b2.height/2.0f);
+        tSub.setPosition(x + 50.f, y + 75.f);
+        win.draw(tSub);
+
+        if (!dice.isUsed && !keyHint.empty()) {
+            sf::Text k(keyHint, font, 14);
+            k.setFillColor(sf::Color::White); k.setOutlineColor(sf::Color::Black); k.setOutlineThickness(1.5f);
+            k.setPosition(x + 5, y + 2);
+            win.draw(k);
+        }
+    };
+
+    float leftX = 200.f; 
+    for (int i = 0; i < (int)playerDice.size(); ++i) {
+        sf::Color border = isAllyTurn ? sf::Color::Cyan : sf::Color(100, 100, 100);
+        string hint = isAllyTurn ? "[" + Utils::toString(i+1) + "]" : "";
+        drawdice(leftX + i * gap, yPos, playerDice[i], border, hint, playerBonusAtk);
+    }
+
+    float rightX = 850.f; 
+    for (int i = 0; i < (int)enemyDice.size(); ++i) {
+        sf::Color border = !isAllyTurn ? sf::Color::Red : sf::Color(100, 100, 100);
+        string hint = !isAllyTurn ? "[" + Utils::toString(i+3) + "]" : "";
+        drawdice(rightX + i * gap, yPos, enemyDice[i], border, hint, enemyBonusAtk);
+    }
+}
+
+void Battle::render(sf::RenderWindow& win) {
+    win.draw(backgroundSprite);
+
+    auto renderTeam = [&](vector<AnimatedMonster>& team, bool isLeft) {
+        for (int i = 0; i < (int)team.size(); ++i) {
+            if (!team[i].monster.isAlive()) continue;
+            string path = team[i].monster.getSpritePath();
+            // === SỬA LỖI PATH: Thêm ../ ===
+            // (Chúng ta cũng kiểm tra xem path có rỗng không)
+            if (path.empty()) continue;
+            if (textureCache.find(path) == textureCache.end()) {
+                if (!textureCache[path].loadFromFile(path)) {
+                     cerr << "Failed to load texture: " << path << endl;
+                     // Chèn một texture placeholder hoặc bỏ qua
+                     continue; 
+                }
+            }
+            
+            sf::Sprite sp(textureCache[path]);
+            sf::FloatRect bounds = sp.getLocalBounds();
+            sp.setOrigin(bounds.width / 2.f, bounds.height / 2.f);
+            
+            float scaleX = isLeft ? 0.35f : -0.35f;
+            sp.setScale(scaleX, 0.35f); 
+            sp.setPosition(team[i].currentPos);
+
+            if (team[i].isHit) {
+                if (fmod(team[i].hitTimer, 0.1f) < 0.05f) sp.setColor(sf::Color::Red); 
+                else sp.setColor(sf::Color::White);
+            } else {
+                if (i == 0) sp.setColor(sf::Color::White); else sp.setColor(sf::Color(150, 150, 150));
+            }
+            win.draw(sp);
+
+            string status = "";
+            int sh = team[i].monster.getShield();
+            if (sh > 0) status += " (Shld:" + Utils::toString(sh) + ")";
+            if (team[i].monster.getBuffDuration() > 0) status += " [AtkUp]";
+
+            sf::Text t(team[i].monster.getName() + "\nHP: " + Utils::toString(team[i].monster.getHP()) + status, font, 16);
+            t.setOutlineColor(sf::Color::Black); t.setOutlineThickness(1.5f); t.setOrigin(t.getLocalBounds().width/2, 0);
+            t.setPosition(team[i].currentPos.x, team[i].currentPos.y - 110);
+            
+            if (sh > 0) t.setFillColor(sf::Color::Yellow);
+            else if (team[i].monster.getBuffDuration() > 0) t.setFillColor(sf::Color(255, 165, 0));
+            else t.setFillColor(sf::Color::White);
+
+            win.draw(t);
+        }
+    };
+
+    renderTeam(animatedAllies, true);
+    renderTeam(animatedEnemies, false);
+
+    win.draw(infoText);
+    renderDiceGroups(win); 
+}
+
+bool Battle::isFinished() const { return state == BattleState::FINISHED; }
+bool Battle::playerWon() const { return winFlag; }
+BattleState Battle::getState() const { return state; }
+
+void Battle::rotateTeam(bool isPlayerTeam, bool left) {
+    vector<Monster> &team = isPlayerTeam ? allies : enemies;
+    vector<AnimatedMonster> &animatedTeam = isPlayerTeam ? animatedAllies : animatedEnemies;
+    if (team.empty()) return;
+
+    if (left) {
+        Monster firstMonster = team[0];
+        for (size_t i = 0; i + 1 < team.size(); ++i) team[i] = team[i+1];
+        team[team.size()-1] = firstMonster;
+    } else {
+        Monster lastMonster = team[team.size()-1];
+        for (size_t i = team.size()-1; i > 0; --i) team[i] = team[i-1];
+        team[0] = lastMonster;
+    }
+    for (size_t i = 0; i < team.size(); ++i) {
+        animatedTeam[i].monster = team[i];
+        animatedTeam[i].currentPos = animatedTeam[i].targetPos; 
+        animatedTeam[i].moveTime = 0.2f; 
+        animatedTeam[i].moveDuration = 0.2f;
+    }
+    calculateFormationPositions(isPlayerTeam);
+}
